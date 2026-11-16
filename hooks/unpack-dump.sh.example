@@ -1,0 +1,11 @@
+# Example hook. Hooks run before every backup; copy to a name ending in .sh.
+#
+# Unpacks the newest database dump, so restic only sends what changed.
+# In compose.override.yaml, mount the dumps at /input/dumps (read-only)
+# and a writable folder at /source/db.
+
+newest=$(ls -t /input/dumps/*.sql.gz 2>/dev/null | head -n 1)
+[ -n "$newest" ] || { echo "No dump found."; exit 1; }
+
+gunzip -c "$newest" > /source/db/dump.sql.tmp &&
+    mv /source/db/dump.sql.tmp /source/db/dump.sql

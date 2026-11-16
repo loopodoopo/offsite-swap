@@ -1,0 +1,6 @@
+# Copy to compose.override.yaml. Everything under /source is backed up.
+services:
+  restic:
+    volumes:
+      - /tank/photos:/source/photos:ro
+      - /home/alice/documents:/source/documents:ro

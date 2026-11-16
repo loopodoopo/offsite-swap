@@ -1,0 +1,65 @@
+# offsite-swap: swap encrypted backups with a friend.
+# Settings are in .env, the folders you back up in compose.override.yaml.
+
+name: offsite-swap
+
+services:
+  # The tunnel. rest-server and restic share its network, so only they are in the tunnel.
+  wireguard:
+    image: lscr.io/linuxserver/wireguard:latest
+    cap_add:
+      - NET_ADMIN
+    environment:
+      TZ: ${TZ:-UTC}
+      PEER_PUBLIC_KEY: ${PEER_PUBLIC_KEY:-}
+      PEER_ENDPOINT: ${PEER_ENDPOINT:-}
+    sysctls:
+      net.ipv4.conf.all.src_valid_mark: 1
+      net.ipv4.ip_forward: 0
+    ports:
+      - ${WG_PORT:-51820}:51820/udp
+    volumes:
+      - ./wireguard:/config
+      - ./scripts/endpoint.sh:/custom-services.d/endpoint:ro
+    restart: unless-stopped
+
+  # Stores the other side's backup. Append-only: they can add and restore, not delete.
+  rest-server:
+    image: restic/rest-server:0.14.0
+    network_mode: service:wireguard
+    depends_on:
+      wireguard:
+        condition: service_started
+        restart: true
+    environment:
+      TZ: ${TZ:-UTC}
+      OPTIONS: --append-only --private-repos ${REST_SERVER_OPTIONS:-}
+    volumes:
+      - ${STORE_DIR:?set STORE_DIR in .env}:/data
+    restart: unless-stopped
+
+  # Backs up everything under /source to the other side, every night.
+  restic:
+    image: restic/restic:0.19.1
+    network_mode: service:wireguard
+    depends_on:
+      wireguard:
+        condition: service_started
+        restart: true
+    entrypoint: ["/scripts/entrypoint.sh"]
+    environment:
+      TZ: ${TZ:-UTC}
+      NAME: ${NAME:?set NAME in .env}
+      BACKUP_SCHEDULE: ${BACKUP_SCHEDULE:-0 4 * * *}
+      CHECK_SCHEDULE: ${CHECK_SCHEDULE:-0 12 * * 0}
+      UPLOAD_LIMIT: ${UPLOAD_LIMIT:-}
+      NOTIFY_OK_URL: ${NOTIFY_OK_URL:-}
+      NOTIFY_FAIL_URL: ${NOTIFY_FAIL_URL:-}
+      RESTIC_REPOSITORY_FILE: /secrets/repository
+      RESTIC_PASSWORD_FILE: /secrets/restic-password
+    volumes:
+      - ./scripts:/scripts:ro
+      - ./hooks:/hooks:ro
+      - ./secrets:/secrets:ro
+      - ./cache:/root/.cache/restic
+    restart: unless-stopped

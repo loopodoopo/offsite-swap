@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+# offsite-swap helper. Run it as root from this folder.
+set -euo pipefail
+cd "$(dirname "$0")"
+
+usage() {
+    cat <<'EOF'
+Usage: ./offsite <command>
+
+  keys     Create your WireGuard key, restic password and login.
+           Prints what to send to the other side.
+  peer     Add the other side's login: ./offsite peer 'bob:$2y$...'
+  up       Write the WireGuard config and start everything.
+  init     Create your repository at the other side (once).
+  backup   Run a backup now.
+  status   Show the tunnel and your latest snapshots.
+  prune    Remove old snapshots. Only works while the other side
+           has turned off append-only.
+EOF
+}
+
+load_env() {
+    if [[ ! -f .env ]]; then
+        echo "Copy .env.example to .env and fill it in first."
+        exit 1
+    fi
+    set -a
+    # shellcheck disable=SC1091
+    . ./.env
+    set +a
+}
+
+# Image name as used in compose.yaml, so versions live in one place.
+image() { docker compose config --images | awk -v n="$1" 'index($0, n) && !f { print; f = 1 }'; }
+
+random_password() { head -c 64 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | cut -c 1-32; }
+
+# docker compose exec, without a TTY when not run from a terminal.
+in_container() {
+    local tty=()
+    [[ -t 0 && -t 1 ]] || tty=(-T)
+    docker compose exec ${tty[@]+"${tty[@]}"} "$@"
+}
+
+cmd_keys() {
+    load_env
+    umask 077
+    mkdir -p secrets
+    local wg_image rest_image public_key login
+    wg_image=$(image linuxserver/wireguard)
+    rest_image=$(image rest-server)
+
+    [[ -s secrets/wg-private-key ]] || docker run --rm --entrypoint wg "$wg_image" genkey > secrets/wg-private-key
+    [[ -s secrets/restic-password ]] || random_password > secrets/restic-password
+    [[ -s secrets/rest-password ]] || random_password > secrets/rest-password
+
+    public_key=$(docker run --rm -i --entrypoint wg "$wg_image" pubkey < secrets/wg-private-key)
+    login=$(docker run --rm -i --entrypoint htpasswd "$rest_image" -niB "$NAME" < secrets/rest-password)
+
+    cat <<EOF
+
+Send this to the other side. None of it is secret.
+
+  Public key:  $public_key
+  Login:       $login
+  Address:     your dynamic DNS name and port ${WG_PORT:-51820}, if you forwarded it
+
+Also put secrets/restic-password in your password manager.
+Without it, your backup at the other side is useless.
+EOF
+}
+
+cmd_peer() {
+    load_env
+    local line=${1:-}
+    if [[ ! $line =~ ^[a-z0-9_-]+:\$2[aby]\$ ]]; then
+        echo "Usage: ./offsite peer 'bob:\$2y\$...'  (the login line from the other side)"
+        exit 1
+    fi
+    local user=${line%%:*}
+    local file="$STORE_DIR/.htpasswd"
+    umask 077
+    touch "$file"
+    { grep -v "^$user:" "$file" || true; echo "$line"; } > "$file.new"
+    mv "$file.new" "$file"
+    echo "Login for $user added."
+    if [[ -n $(docker compose ps -q rest-server 2>/dev/null) ]]; then
+        docker compose restart rest-server
+    fi
+}
+
+cmd_up() {
+    load_env
+    if [[ ! -s secrets/wg-private-key ]]; then
+        echo "Run ./offsite keys first."
+        exit 1
+    fi
+    if [[ -z ${PEER_PUBLIC_KEY:-} ]]; then
+        echo "Put PEER_PUBLIC_KEY in .env first."
+        exit 1
+    fi
+    umask 077
+    mkdir -p wireguard/wg_confs cache
+    cat > wireguard/wg_confs/wg0.conf <<EOF
+# Written by ./offsite up. Change .env instead.
+[Interface]
+Address = $TUNNEL_IP/32
+ListenPort = 51820
+PrivateKey = $(cat secrets/wg-private-key)
+# Through the tunnel only the rest-server port is reachable. Nothing is forwarded.
+PostUp = iptables -P FORWARD DROP; iptables -A INPUT -i %i -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT; iptables -A INPUT -i %i -p tcp --dport 8000 -j ACCEPT; iptables -A INPUT -i %i -p icmp -j ACCEPT; iptables -A INPUT -i %i -j DROP
+PostDown = iptables -F INPUT
+
+[Peer]
+PublicKey = $PEER_PUBLIC_KEY
+AllowedIPs = $PEER_TUNNEL_IP/32
+PersistentKeepalive = 25
+EOF
+    printf 'rest:http://%s:%s@%s:8000/%s/' \
+        "$NAME" "$(cat secrets/rest-password)" "$PEER_TUNNEL_IP" "$NAME" > secrets/repository
+    docker compose up -d
+}
+
+cmd_status() {
+    echo "Tunnel:"
+    in_container wireguard wg show wg0
+    echo
+    echo "Your latest snapshots:"
+    in_container restic restic snapshots --latest 3
+}
+
+cmd_prune() {
+    echo "This only works while the other side has turned off append-only."
+    echo "Ask them to make a ZFS snapshot first."
+    in_container restic restic forget --prune \
+        --keep-within-daily 30d --keep-within-weekly 6m --keep-within-monthly 5y
+}
+
+case "${1:-}" in
+    keys) cmd_keys ;;
+    peer) cmd_peer "${2:-}" ;;
+    up) cmd_up ;;
+    init) in_container restic restic init ;;
+    backup) in_container restic /scripts/backup.sh ;;
+    status) cmd_status ;;
+    prune) cmd_prune ;;
+    *) usage ;;
+esac
