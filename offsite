@@ -7,15 +7,19 @@ usage() {
     cat <<'EOF'
 Usage: ./offsite <command>
 
-  keys     Create your WireGuard key, restic password and login.
-           Prints what to send to the other side.
-  peer     Add the other side's login: ./offsite peer 'bob:$2y$...'
-  up       Write the WireGuard config and start everything.
-  init     Create your repository at the other side (once).
-  backup   Run a backup now.
-  status   Show the tunnel and your latest snapshots.
-  prune    Remove old snapshots. Only works while the other side
-           has turned off append-only.
+  keys          Create your WireGuard key, restic password and login.
+                Prints what to send to the other side.
+  peer          Add the other side's login: ./offsite peer 'bob:$2y$...'
+  up            Write the WireGuard config and (re)start everything.
+  init          Create your repository at the other side (once).
+  backup        Run a backup now.
+  status        Show the tunnel, your latest snapshots and your rest-server mode.
+  restore DIR   Put your latest snapshot in DIR.
+
+Cleaning up (rarely):
+  allow-prune   Turn off append-only on your rest-server, so the other side can prune.
+  prune         Remove your old snapshots at the other side.
+  append-only   Turn append-only back on.
 EOF
 }
 
@@ -42,8 +46,18 @@ in_container() {
     docker compose exec ${tty[@]+"${tty[@]}"} "$@"
 }
 
+confirm() {
+    local answer
+    read -r -p "$1 [y/N] " answer
+    [[ $answer == y || $answer == Y ]]
+}
+
 cmd_keys() {
     load_env
+    if [[ ! ${NAME:-} =~ ^[a-z0-9_-]+$ ]]; then
+        echo "NAME in .env may only contain a-z, 0-9, - and _."
+        exit 1
+    fi
     umask 077
     mkdir -p secrets
     local wg_image rest_image public_key login
@@ -107,9 +121,24 @@ cmd_up() {
 Address = $TUNNEL_IP/32
 ListenPort = 51820
 PrivateKey = $(cat secrets/wg-private-key)
-# Through the tunnel only the rest-server port is reachable. Nothing is forwarded.
-PostUp = iptables -P FORWARD DROP; iptables -A INPUT -i %i -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT; iptables -A INPUT -i %i -p tcp --dport 8000 -j ACCEPT; iptables -A INPUT -i %i -p icmp -j ACCEPT; iptables -A INPUT -i %i -j DROP
-PostDown = iptables -F INPUT
+
+# Nothing is forwarded.
+PostUp = iptables -P FORWARD DROP
+# Through the tunnel only the rest-server port is reachable.
+PostUp = iptables -A INPUT -i %i -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+PostUp = iptables -A INPUT -i %i -p tcp --dport 8000 -j ACCEPT
+PostUp = iptables -A INPUT -i %i -p icmp -j ACCEPT
+PostUp = iptables -A INPUT -i %i -j DROP
+# These containers can't reach your network, only the internet and DNS.
+PostUp = iptables -A OUTPUT -o eth+ -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+PostUp = iptables -A OUTPUT -o eth+ -p udp --sport 51820 -j ACCEPT
+PostUp = iptables -A OUTPUT -o eth+ -p udp --dport 53 -j ACCEPT
+PostUp = iptables -A OUTPUT -o eth+ -p tcp --dport 53 -j ACCEPT
+PostUp = iptables -A OUTPUT -o eth+ -d 10.0.0.0/8 -j REJECT
+PostUp = iptables -A OUTPUT -o eth+ -d 172.16.0.0/12 -j REJECT
+PostUp = iptables -A OUTPUT -o eth+ -d 192.168.0.0/16 -j REJECT
+PostUp = iptables -A OUTPUT -o eth+ -d 169.254.0.0/16 -j REJECT
+PostDown = iptables -F INPUT; iptables -F OUTPUT
 
 [Peer]
 PublicKey = $PEER_PUBLIC_KEY
@@ -118,7 +147,7 @@ PersistentKeepalive = 25
 EOF
     printf 'rest:http://%s:%s@%s:8000/%s/' \
         "$NAME" "$(cat secrets/rest-password)" "$PEER_TUNNEL_IP" "$NAME" > secrets/repository
-    docker compose up -d
+    docker compose up -d --force-recreate
 }
 
 cmd_status() {
@@ -127,11 +156,37 @@ cmd_status() {
     echo
     echo "Your latest snapshots:"
     in_container restic restic snapshots --latest 3
+    echo
+    echo "Your rest-server runs with: $(in_container rest-server printenv OPTIONS)"
+}
+
+cmd_restore() {
+    load_env
+    if [[ -z ${1:-} ]]; then
+        echo "Usage: ./offsite restore /some/folder"
+        exit 1
+    fi
+    mkdir -p "$1"
+    local target
+    target=$(cd "$1" && pwd)
+    docker compose run --rm --no-deps --entrypoint restic -v "$target:/restore" restic \
+        restore latest --host "$NAME" --target /restore
+    echo "Restored to $target."
+}
+
+cmd_allow_prune() {
+    echo "Your friend's backup can be deleted while append-only is off."
+    echo "Make a ZFS snapshot of your STORE_DIR first."
+    confirm "Turn off append-only?" || exit 1
+    local files=(-f compose.yaml)
+    [[ -f compose.override.yaml ]] && files+=(-f compose.override.yaml)
+    docker compose "${files[@]}" -f scripts/allow-prune.yaml up -d --force-recreate rest-server
+    echo "Append-only is off. Run ./offsite append-only when your friend is done."
 }
 
 cmd_prune() {
     echo "This only works while the other side has turned off append-only."
-    echo "Ask them to make a ZFS snapshot first."
+    confirm "Remove old snapshots at the other side?" || exit 1
     in_container restic restic forget --prune \
         --keep-within-daily 30d --keep-within-weekly 6m --keep-within-monthly 5y
 }
@@ -143,6 +198,9 @@ case "${1:-}" in
     init) in_container restic restic init ;;
     backup) in_container restic /scripts/backup.sh ;;
     status) cmd_status ;;
+    restore) cmd_restore "${2:-}" ;;
+    allow-prune) cmd_allow_prune ;;
     prune) cmd_prune ;;
+    append-only) docker compose up -d --force-recreate rest-server && echo "Append-only is on." ;;
     *) usage ;;
 esac

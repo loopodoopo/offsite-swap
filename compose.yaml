@@ -41,6 +41,7 @@ services:
   # Backs up everything under /source to the other side, every night.
   restic:
     image: restic/restic:0.19.1
+    init: true
     network_mode: service:wireguard
     depends_on:
       wireguard:

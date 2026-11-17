@@ -1,0 +1,5 @@
+# Used by ./offsite allow-prune: the same rest-server, without --append-only.
+services:
+  rest-server:
+    environment:
+      OPTIONS: --private-repos ${REST_SERVER_OPTIONS:-}
