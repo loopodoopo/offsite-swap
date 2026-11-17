@@ -26,16 +26,19 @@ services:
   # Stores the other side's backup. Append-only: they can add and restore, not delete.
   rest-server:
     image: restic/rest-server:0.14.0
+    init: true
     network_mode: service:wireguard
     depends_on:
       wireguard:
         condition: service_started
         restart: true
+    entrypoint: ["/scripts/watch-network.sh", "/entrypoint.sh"]
     environment:
       TZ: ${TZ:-UTC}
       OPTIONS: --append-only --private-repos ${REST_SERVER_OPTIONS:-}
     volumes:
       - ${STORE_DIR:?set STORE_DIR in .env}:/data
+      - ./scripts:/scripts:ro
     restart: unless-stopped
 
   # Backs up everything under /source to the other side, every night.

@@ -4,7 +4,7 @@ set -u
 
 # restic check needs the repository to itself, so wait for a running backup.
 exec 9> /tmp/backup.lock
-flock -w 86400 9 || { echo "Backup still running, check skipped."; exit 0; }
+timeout 86400 flock 9 || { echo "Backup still running after a day, check skipped."; exit 0; }
 
 echo "$(date '+%F %T') Check started."
 if restic check; then
