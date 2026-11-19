@@ -59,6 +59,7 @@ services:
       UPLOAD_LIMIT: ${UPLOAD_LIMIT:-}
       NOTIFY_OK_URL: ${NOTIFY_OK_URL:-}
       NOTIFY_FAIL_URL: ${NOTIFY_FAIL_URL:-}
+      NOTIFY_FAIL_AFTER_DAYS: ${NOTIFY_FAIL_AFTER_DAYS:-3}
       RESTIC_REPOSITORY_FILE: /secrets/repository
       RESTIC_PASSWORD_FILE: /secrets/restic-password
     volumes:

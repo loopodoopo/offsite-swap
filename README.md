@@ -39,7 +39,9 @@ Run as root. Agree with your friend who uses tunnel address `.1` and who uses `.
 6. `./offsite init`, once your friend has done step 5.
 7. Put `secrets/restic-password` in your password manager. Without it, your backup is useless.
 
-Backups run every night at 04:00. `./offsite status` shows the tunnel, your latest snapshots and whether your rest-server is append-only.
+Backups run every night at 04:00. Was a server off, or your friend offline? Then it backs up as soon as both are on again (it looks every 15 minutes). The weekly check catches up the same way.
+
+`./offsite status` shows the tunnel, your latest snapshots and whether your rest-server is append-only.
 
 Need to prepare something first, like a database dump? Put a script in `hooks/`.
 Want to hear when backups stop? Point `NOTIFY_OK_URL` at a dead man's switch, such as healthchecks.io.
